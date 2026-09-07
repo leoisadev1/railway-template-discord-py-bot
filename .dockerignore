@@ -1,0 +1,11 @@
+.git
+.github
+.venv
+__pycache__
+*.pyc
+.railway
+.env
+STATUS.md
+*.md
+.python-version
+

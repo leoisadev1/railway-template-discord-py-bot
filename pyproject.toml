@@ -1,0 +1,12 @@
+[project]
+name = "discord-py-bot"
+version = "1.0.0"
+description = "A modern discord.py starter with slash commands and a Railway health endpoint."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "discord.py==2.7.1",
+]
+
+[tool.uv]
+package = false
