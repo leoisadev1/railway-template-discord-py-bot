@@ -1,105 +1,54 @@
 # Deploy and Host Discord.py Bot on Railway
 
-A one-service **discord.py 2.7** worker with slash commands, a pinned Python 3.12 image, a `uv` lockfile, and a `/health` endpoint used only for Railway healthchecks. Set `DISCORD_TOKEN` and deploy.
-
-This listing replaces rotting marketplace clones frozen on discord.py 2.1.0 (Jan 2023) with no lockfile and no healthcheck.
+A Python Discord gateway worker using discord.py 2.7.1, `/ping` and `/info`, locked dependencies, and separate HTTP readiness/liveness endpoints. No public homepage, database, or volume is needed.
 
 ## About Hosting Discord.py Bot
 
-The bot is a worker, not a website. It opens a Discord gateway session and serves `GET /health` on `$PORT` so Railway can healthcheck the replica. There is no public homepage.
+The Dockerfile pins Python 3.12.14 and the uv build image by digest, installs frozen production dependencies from `uv.lock`, and runs as non-root UID/GID 10001. Keep one replica and sleeping disabled for the gateway connection.
 
-Create a bot token at the [Discord Developer Portal](https://discord.com/developers/applications) → your application → **Bot** → **Reset Token**. Invite the bot with the `bot` and `applications.commands` scopes.
+### Required Discord setup
 
-Slash commands (`/ping`, `/info`) work with **default intents**. Privileged intents stay off unless you opt in.
+1. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications).
+2. Set `DISCORD_TOKEN` to its **Bot token**. No dummy or generated default is provided.
+3. Invite it with OAuth2 scopes `bot` and `applications.commands` and permissions to send command replies.
+4. Deploy, wait for command synchronization and gateway readiness, then invoke `/ping` and `/info` in Discord.
+5. For guild-scoped synchronization, set optional `DISCORD_GUILD_ID` to that guild's positive snowflake ID. Omit it for global synchronization, whose propagation is controlled by Discord.
+
+**Real Discord authentication and chat replies require a valid user-supplied bot token.** No live provider E2E result is claimed. A process responding to HTTP alone is not a working bot.
+
+### Variables and intents
+
+- `DISCORD_TOKEN`: required secret, no default; never commit it.
+- `PORT`: internal readiness listener, default `8080`; `HOST` defaults to `0.0.0.0` inside the container.
+- `DISCORD_GUILD_ID`: optional command-sync scope.
+- `MESSAGE_CONTENT_INTENT`, `MEMBERS_INTENT`, and `PRESENCES_INTENT`: default `false`. Enable only when needed and after matching opt-in in the Developer Portal. Slash commands do not require privileged intents.
+
+Synchronization replaces the chosen scope's command tree. Use a dedicated application and review command removals before deployment. Rejected intents or synchronization failures prevent successful startup.
+
+### Health and operation
+
+`/health`, `/healthz`, and `/ready` return 200 only with synchronized commands and a connected, ready gateway; otherwise 503. `/live` reports process liveness independently. The root and unknown GET routes return 404; public Discord HTTP interactions are not implemented. Railway checks `/health` with a 60-second allowance and restarts on failure. This deployment check is not continuous dependency monitoring.
+
+Missing/rejected credentials, invalid guild IDs, sync/intent/bind failures, startup timeout, and unexpected gateway termination fail closed. SIGTERM/SIGINT close gateway and HTTP resources. `/ping` reports latency and `/info` reports library/bot information ephemerally. Edit `bot.py` to extend the commands. Voice support is not included.
+
+The worker has no durable data store. Local mock-provider tests cannot verify Discord permission setup, gateway connectivity, propagation, replies, or container permissions; validate those in your own deployment.
 
 ## Common Use Cases
 
-- Host a small moderation, utility, or community bot 24/7.
-- Start a slash-command bot without a dummy Flask homepage.
-- Keep a pinned discord.py 2.x worker that actually passes Railway healthchecks.
+- Python slash-command prototypes.
+- Community bots with guild-scoped development commands.
+- A lightweight Discord gateway worker without public networking.
 
 ## Dependencies for Discord.py Bot Hosting
 
-- Python **3.12.14** (digest-pinned `python:3.12.14-slim-bookworm`).
-- **discord.py 2.7.1** locked in `uv.lock`.
-- A Discord application bot token (`DISCORD_TOKEN`).
-- No database and no volume. Stateless gateway worker.
+A Railway worker, real Discord Bot token, and an appropriately scoped invitation.
 
 ### Deployment Dependencies
 
-- Source: https://github.com/leoisadev1/railway-template-discord-py-bot
-- discord.py docs: https://discordpy.readthedocs.io/en/stable/
-- Discord Developer Portal: https://discord.com/developers/applications
-- Privileged intents: https://discord.com/developers/docs/events/gateway#privileged-intents
+- [Template source](https://github.com/leoisadev1/railway-template-discord-py-bot).
+- [discord.py documentation](https://discordpy.readthedocs.io/).
+- Python 3.12, uv, and the committed `uv.lock`.
 
 ## Why Deploy Discord.py Bot on Railway?
 
-Railway is a singular platform to deploy your infrastructure stack. Railway will host your infrastructure so you don't have to deal with configuration, while allowing you to vertically and horizontally scale it.
-
-By deploying Discord.py Bot on Railway, you are one step closer to supporting a complete full-stack application with minimal burden. Host your servers, databases, AI agents, and more on Railway.
-
-## Variables
-
-| Variable | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `DISCORD_TOKEN` | **yes** | none | Bot token from the Developer Portal. User-provided. Never baked in. |
-| `PORT` | no | `8080` | Injected by Railway. Healthcheck listen port. |
-| `DISCORD_GUILD_ID` | no | unset | If set, slash commands sync instantly to that guild. Omit for global sync (can take up to an hour). |
-| `MESSAGE_CONTENT_INTENT` | no | `false` | Privileged. Set `true` only after enabling **Message Content Intent** in the portal. |
-| `MEMBERS_INTENT` | no | `false` | Privileged. Set `true` only after enabling **Server Members Intent**. |
-| `PRESENCES_INTENT` | no | `false` | Privileged. Set `true` only after enabling **Presence Intent**. |
-
-No generated secrets. No dummy token.
-
-## Privileged intents
-
-Slash commands work with default intents. Enable privileged intents in the Developer Portal **and** with the matching env flags. If they disagree, discord.py raises `PrivilegedIntentsRequired` and the process keeps `/health` up so you can fix the config without a crash loop.
-
-## Ports
-
-| Port | Purpose |
-| --- | --- |
-| `$PORT` (HTTP) | Railway healthcheck only: `GET /health` → `{"status":"ok"}`. Not a website. No public homepage. |
-
-You do not need a public domain for the bot to talk to Discord. Railway uses `/health` internally.
-
-## Volumes
-
-None. This is a stateless gateway worker. Add a volume later if you persist your own data.
-
-## Login / invite
-
-1. Developer Portal → OAuth2 → URL Generator.
-2. Scopes: `bot` + `applications.commands`.
-3. Grant the permissions your commands need (Send Messages is enough for `/ping`).
-4. Open the generated URL, pick a server, authorize.
-5. In Discord, type `/ping`.
-
-## Included commands
-
-- `/ping` — round-trip latency
-- `/info` — discord.py version and bot user
-
-Edit `bot.py` and redeploy to add commands.
-
-## Why this is healthier than the old marketplace clones
-
-| | This template | Typical rotting clone |
-| --- | --- | --- |
-| Python | **3.12.14-slim-bookworm** digest-pinned | Unpinned / 3.10 era |
-| discord.py | **2.7.1** in `uv.lock` | `discord.py==2.1.0` (Jan 2023) |
-| Commands | Slash (`app_commands`) | Prefix `!` only |
-| Healthcheck | `GET /health` on `$PORT` | None (health 0) |
-| Token | Required, empty default | Sometimes a dummy |
-| Shape | One worker service | Dummy Flask homepage |
-
-## Local run
-
-```bash
-uv sync --frozen
-export DISCORD_TOKEN=your-token
-export PORT=8080
-uv run python bot.py
-```
-
-`curl -fsS http://127.0.0.1:8080/health` should return `{"status":"ok"}`.
+Railway hosts the worker with secret variables, deployment logs, healthchecks, and restart policy. Discord credentials, application permissions, and real command-delivery validation remain your responsibility.

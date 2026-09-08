@@ -5,6 +5,10 @@ __pycache__
 *.pyc
 .railway
 .env
+.env.*
+.audit-work
+tests
+proposed-config.json
 STATUS.md
 *.md
 .python-version
