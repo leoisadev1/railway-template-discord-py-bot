@@ -147,6 +147,19 @@ class Bot(discord.Client):
         self.gateway_connected = True
 
 
+def configuration_problem(exc: BaseException) -> str | None:
+    """The NEEDS_CONFIGURATION reason for a startup failure a restart cannot fix, else None."""
+    if isinstance(exc, discord.LoginFailure):  # HTTP 401 on login
+        return "TokenInvalid"
+    if isinstance(exc, discord.PrivilegedIntentsRequired):  # gateway close 4014
+        return "PrivilegedIntentsRequired"
+    if isinstance(exc, discord.ConnectionClosed) and exc.code == 4004:  # token refused at IDENTIFY
+        return "TokenInvalid"
+    if isinstance(exc, discord.HTTPException) and exc.status == 401:  # revoked before the app lookup or sync
+        return "TokenInvalid"
+    return None
+
+
 async def run_discord(
     token: str, *, client: Bot | None = None, host: str | None = None,
     port: int | None = None, startup_timeout: float = 25.0, shutdown_timeout: float = 5.0,
@@ -156,6 +169,7 @@ async def run_discord(
     client = client if client is not None else Bot()
     server = thread = None
     tasks: list[asyncio.Task] = []
+    failure: BaseException | None = None
     try:
         await client.__aenter__()
         server, thread = start_health_server(client.health_status, host=host, port=port)
@@ -173,6 +187,9 @@ async def run_discord(
             raise RuntimeError("Discord commands were not synchronized")
         await worker
         raise RuntimeError("Discord gateway stopped unexpectedly")
+    except BaseException as exc:
+        failure = exc
+        raise
     finally:
         client.stopping = True
 
@@ -185,6 +202,11 @@ async def run_discord(
         try:
             # Close once: Client.__aexit__ would retry an already timed-out close.
             await asyncio.wait_for(close_gateway(), timeout=shutdown_timeout)
+        except TimeoutError:
+            # A stuck close must not hide a configuration verdict that main() turns into idle.
+            if failure is None or configuration_problem(failure) is None:
+                raise
+            log.error("Discord gateway shutdown timed out")
         finally:
             if server is not None:
                 await asyncio.to_thread(stop_health_server, server, thread)
@@ -202,24 +224,66 @@ async def serve(token: str) -> None:
             loop.remove_signal_handler(sig)
 
 
+TOKEN_HELP = (
+    "In the Discord Developer Portal open your application, go to Bot, press Reset Token and set the new "
+    "token as DISCORD_TOKEN on this Railway service (not the application ID, public key or client secret). "
+    "Railway redeploys the service when the variable changes."
+)
+# Configuration a restart cannot fix. The bot idles with /live up instead of crash-looping, so the
+# deployment stays reachable and the log says what to change.
+NEEDS_CONFIGURATION = {
+    "TokenMissing": "DISCORD_TOKEN is not set. " + TOKEN_HELP,
+    "TokenInvalid": "Discord rejected DISCORD_TOKEN. " + TOKEN_HELP,
+    "PrivilegedIntentsRequired": (
+        "Discord refused a privileged intent enabled here (MESSAGE_CONTENT_INTENT, MEMBERS_INTENT or "
+        "PRESENCES_INTENT). Turn it on under Bot > Privileged Gateway Intents in the Discord Developer "
+        "Portal, or set the variable to false on this Railway service."
+    ),
+}
+
+
+async def idle(reason: str, *, host: str | None = None, port: int | None = None) -> None:
+    """Serve /live (200) and /health (503, needs_configuration) until SIGTERM or SIGINT."""
+    status = {"ready": False, "live": True, "discord": "needs_configuration", "reason": reason, "commandsSynced": False}
+    server, thread = start_health_server(lambda: status, host=host, port=port)
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    log.error("The bot is idle and not connected to Discord. %s", NEEDS_CONFIGURATION[reason])
+    try:
+        await stop.wait()
+    finally:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.remove_signal_handler(sig)
+        await asyncio.to_thread(stop_health_server, server, thread)
+
+
 def main() -> int:
     token = os.getenv("DISCORD_TOKEN", "").strip()
+    reason = None
     if not token:
-        log.error("DISCORD_TOKEN is required; set a Discord Developer Portal bot token")
-        return 1
-    try:
-        asyncio.run(serve(token))
-    except (KeyboardInterrupt, asyncio.CancelledError):
-        return 0
-    except discord.LoginFailure:
-        log.error("DISCORD_TOKEN was rejected by Discord")
-    except discord.PrivilegedIntentsRequired:
-        log.error("A privileged intent is enabled here but not in the Discord Developer Portal")
-    except Exception as exc:
-        log.error("Discord startup/runtime failed (%s); check configuration, command permissions and connectivity", type(exc).__name__)
+        reason = "TokenMissing"
     else:
-        return 0
-    return 1
+        try:
+            asyncio.run(serve(token))
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            return 0
+        except Exception as exc:
+            reason = configuration_problem(exc)
+            if reason is None:
+                log.error("Discord startup/runtime failed (%s); check configuration, command permissions and connectivity", type(exc).__name__)
+                return 1
+        else:
+            return 0
+    try:
+        asyncio.run(idle(reason))
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    except Exception as exc:
+        log.error("Could not start the idle health listener (%s)", type(exc).__name__)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

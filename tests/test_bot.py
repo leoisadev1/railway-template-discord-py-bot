@@ -198,6 +198,21 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             await bot.run_discord("synthetic", client=client, host=HOST, port=0)
         self.assertTrue(client.is_closed())
 
+    async def test_shutdown_timeout_keeps_a_rejected_token_verdict(self):
+        client = bot.Bot()
+        client.start = AsyncMock(side_effect=discord.LoginFailure("synthetic 401"))
+
+        async def hang():
+            await asyncio.Event().wait()
+
+        real_close = client.close
+        client.close = AsyncMock(side_effect=hang)
+        try:
+            with self.assertRaises(discord.LoginFailure):
+                await bot.run_discord("synthetic", client=client, host=HOST, port=0, shutdown_timeout=0.03)
+        finally:
+            await real_close()
+
     async def test_shutdown_timeout_still_closes_http_without_retrying_close(self):
         client = bot.Bot()
         client.start = AsyncMock(side_effect=RuntimeError("synthetic failure"))
@@ -241,16 +256,68 @@ class ConfigurationTests(unittest.TestCase):
             intents = bot.build_intents()
             self.assertTrue(intents.message_content and intents.members and intents.presences)
 
-    def test_cli_missing_and_mocked_invalid_token_exit_one(self):
-        env = {"PATH": os.environ["PATH"], "HOST": HOST, "PORT": "0"}
-        missing = subprocess.run([sys.executable, "bot.py"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=5)
-        self.assertEqual(missing.returncode, 1)
-        self.assertIn("DISCORD_TOKEN is required", missing.stderr)
-        rejected = subprocess.run([sys.executable, "tests/provider.py"], cwd=ROOT,
-                                  env={**env, "DISCORD_TOKEN": "synthetic", "TEST_PROVIDER_MODE": "invalid"},
-                                  capture_output=True, text=True, timeout=5)
-        self.assertEqual(rejected.returncode, 1)
-        self.assertIn("DISCORD_TOKEN was rejected", rejected.stderr)
+    def test_cli_idles_on_missing_rejected_token_and_refused_intent(self):
+        import threading
+        import time
+        import urllib.error
+        import urllib.request
+        base = {"PATH": os.environ["PATH"], "HOST": HOST, "PORT": "0"}
+        cases = [
+            (["bot.py"], {}, "TokenMissing", "DISCORD_TOKEN is not set."),
+            (["tests/provider.py"], {"DISCORD_TOKEN": "synthetic-invalid", "TEST_PROVIDER_MODE": "invalid"},
+             "TokenInvalid", "Discord rejected DISCORD_TOKEN."),
+            (["tests/provider.py"], {"DISCORD_TOKEN": "synthetic-invalid", "TEST_PROVIDER_MODE": "identify-4004"},
+             "TokenInvalid", "Discord rejected DISCORD_TOKEN."),
+            (["tests/provider.py"], {"DISCORD_TOKEN": "synthetic-invalid", "TEST_PROVIDER_MODE": "sync-401"},
+             "TokenInvalid", "Discord rejected DISCORD_TOKEN."),
+            (["tests/provider.py"], {"DISCORD_TOKEN": "synthetic", "TEST_PROVIDER_MODE": "intents"},
+             "PrivilegedIntentsRequired", "Privileged Gateway Intents"),
+        ]
+        for args, env, reason, hint in cases:
+            with self.subTest(reason=reason):
+                child = subprocess.Popen([sys.executable, *args], cwd=ROOT, env={**base, **env},
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                lines: list[str] = []
+                reader = threading.Thread(target=lambda: lines.extend(iter(child.stderr.readline, "")), daemon=True)
+                reader.start()
+                try:
+                    deadline, port = time.monotonic() + 5, None
+                    while port is None:
+                        self.assertLess(time.monotonic(), deadline, "".join(lines))
+                        self.assertIsNone(child.poll(), "".join(lines))
+                        if any("The bot is idle" in l for l in list(lines)):
+                            port = next(int(l.rsplit(" ", 1)[1]) for l in reversed(list(lines)) if "healthcheck listening on port" in l)
+                        else:
+                            time.sleep(0.05)
+                    self.assertIn(hint, "".join(lines))
+                    self.assertNotIn("synthetic-invalid", "".join(lines))
+                    with urllib.request.urlopen(f"http://{HOST}:{port}/live", timeout=3) as live:
+                        self.assertEqual(live.status, 200)
+                    with self.assertRaises(urllib.error.HTTPError) as health:
+                        urllib.request.urlopen(f"http://{HOST}:{port}/health", timeout=3)
+                    self.assertEqual(health.exception.code, 503)
+                    body = json.loads(health.exception.read())
+                    self.assertEqual((body["discord"], body["reason"], body["ready"], body["live"]),
+                                     ("needs_configuration", reason, False, True))
+                    child.send_signal(signal.SIGTERM)
+                    self.assertEqual(child.wait(timeout=5), 0)
+                    reader.join(timeout=5)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.communicate()
+
+    def test_cli_permission_failure_still_exits_one(self):
+        env = {"PATH": os.environ["PATH"], "HOST": HOST, "PORT": "0", "DISCORD_TOKEN": "synthetic", "TEST_PROVIDER_MODE": "sync-403"}
+        forbidden = subprocess.run([sys.executable, "tests/provider.py"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(forbidden.returncode, 1, forbidden.stderr)
+        self.assertIn("Discord startup/runtime failed (Forbidden)", forbidden.stderr)
+
+    def test_cli_outage_still_exits_one(self):
+        env = {"PATH": os.environ["PATH"], "HOST": HOST, "PORT": "0", "DISCORD_TOKEN": "synthetic", "TEST_PROVIDER_MODE": "outage"}
+        outage = subprocess.run([sys.executable, "tests/provider.py"], cwd=ROOT, env=env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(outage.returncode, 1, outage.stderr)
+        self.assertIn("Discord startup/runtime failed (OSError)", outage.stderr)
 
     def test_cli_sigterm_and_sigint_close_cleanly(self):
         for sig in (signal.SIGTERM, signal.SIGINT):

@@ -23,13 +23,13 @@ The Dockerfile pins Python 3.12.14 and the uv build image by digest, installs fr
 - `DISCORD_GUILD_ID`: optional command-sync scope.
 - `MESSAGE_CONTENT_INTENT`, `MEMBERS_INTENT`, and `PRESENCES_INTENT`: default `false`. Enable only when needed and after matching opt-in in the Developer Portal. Slash commands do not require privileged intents.
 
-Synchronization replaces the chosen scope's command tree. Use a dedicated application and review command removals before deployment. Rejected intents or synchronization failures prevent successful startup.
+Synchronization replaces the chosen scope's command tree. Use a dedicated application and review command removals before deployment. A refused privileged intent leaves the bot idle (see below); synchronization failures prevent successful startup.
 
 ### Health and operation
 
-`/health`, `/healthz`, and `/ready` return 200 only with synchronized commands and a connected, ready gateway; otherwise 503. `/live` reports process liveness independently. The root and unknown GET routes return 404; public Discord HTTP interactions are not implemented. Railway checks `/health` with a 60-second allowance and restarts on failure. This deployment check is not continuous dependency monitoring.
+`/health`, `/healthz`, and `/ready` return 200 only with synchronized commands and a connected, ready gateway; otherwise 503. `/live` reports process liveness independently. The root and unknown GET routes return 404; public Discord HTTP interactions are not implemented. Railway probes `/live` once per deployment, allowing 60 seconds, so a deployment goes live once the process is up, before Discord login finishes; separately, the `ON_FAILURE` policy restarts the process if it exits. This deployment check is not continuous dependency monitoring.
 
-Missing/rejected credentials, invalid guild IDs, sync/intent/bind failures, startup timeout, and unexpected gateway termination fail closed. SIGTERM/SIGINT close gateway and HTTP resources. `/ping` reports latency and `/info` reports library/bot information ephemerally. Edit `bot.py` to extend the commands. Voice support is not included.
+A missing `DISCORD_TOKEN`, one Discord rejects during startup (HTTP 401 on login, the application lookup or command sync, or close code 4004 at identify), or a privileged intent the Developer Portal does not allow, does not crash-loop: the bot stays idle, `/health` returns 503 with `"discord": "needs_configuration"` and a `reason`, and the deploy log says what to change. Setting the variable redeploys the service. Invalid guild IDs, sync and bind failures, startup timeout, and unexpected gateway termination exit nonzero and Railway restarts the bot. SIGTERM/SIGINT close gateway and HTTP resources. `/ping` reports latency and `/info` reports library/bot information ephemerally. Edit `bot.py` to extend the commands. Voice support is not included.
 
 The worker has no durable data store. Local mock-provider tests cannot verify Discord permission setup, gateway connectivity, propagation, replies, or container permissions; validate those in your own deployment.
 
