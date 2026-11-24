@@ -4,7 +4,7 @@ A Python Discord gateway worker using discord.py 2.7.1, `/ping` and `/info`, loc
 
 ## About Hosting Discord.py Bot
 
-The Dockerfile pins Python 3.12.14 and the uv build image by digest, installs frozen production dependencies from `uv.lock`, and runs as non-root UID/GID 10001. Keep one replica and sleeping disabled for the gateway connection.
+The Dockerfile pins Python 3.12.16 and the uv build image by digest, installs frozen production dependencies from `uv.lock`, and runs as non-root UID/GID 10001. Keep one replica and sleeping disabled for the gateway connection.
 
 ### Required Discord setup
 
